@@ -323,7 +323,7 @@ function TeamBand({ team, label, m, tint }: { team: Team; label: string; m: Bonu
           <Scorecard team={team} m={m} />
           <Panel
             title="Logo churn"
-            info="Accounts whose Stripe subscription was canceled in the period, credited to the account's current CSM under this rule, with their total ARR (core + AI, after coupons). Lower is better."
+            info="Paying accounts whose Stripe subscription was canceled in the period and that haven't resubscribed (lapsed trials and returned customers are excluded), credited to the account's current CSM under this rule, with their total ARR (core + AI, after coupons). Lower is better."
             section={m.logoChurn}
           />
           <Panel
