@@ -201,9 +201,19 @@ export function rollupByCsm<K extends string>(
 // 1. Logo churn per CSM — accounts whose Stripe subscription was canceled in
 // the window, grouped by the CSM who owned them. "Locked as of Oct 1" =
 // Stripe_Subscription_Canceled_At__c populated (per Alfredo/Santi, 2026-09-28).
+// Same two exclusions the CX capacity planner's churn model uses, which
+// brought it within 1-2% of finance's gross churn:
+//   - never billed: a lapsed trial carries a cancel date but never paid, so no
+//     customer was lost (Stripe_Subscription_First_Invoice_At__c is null).
+//   - came back: Canceled_At stays set from the old subscription when an
+//     account resubscribes, so an account that is active or trialing today
+//     is not churn. past_due / unpaid / incomplete* still count — those have
+//     not resubscribed, the status just lags the cancel date.
 const CHURN_WHERE = (windowStart: string, windowEnd: string) => `
   WHERE Stripe_Subscription_Canceled_At__c >= ${dt(windowStart)}
     AND Stripe_Subscription_Canceled_At__c < ${dt(windowEnd)}
+    AND Stripe_Subscription_First_Invoice_At__c != null
+    AND Stripe_Subscription_Status__c NOT IN ('active', 'trialing')
     AND Test_Account__c = false`;
 
 const LOGO_CHURN_SOQL = (windowStart: string, windowEnd: string) => `
