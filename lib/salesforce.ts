@@ -82,6 +82,27 @@ export async function soqlQuery<T = Record<string, unknown>>(soql: string): Prom
   return (await res.json()) as SoqlResult<T>;
 }
 
+// Every page of a row query (soqlQuery returns only the first ~2,000 rows).
+// Throws on a short read so a partial pull never shows as a real total.
+export async function soqlQueryAll<T = Record<string, unknown>>(soql: string): Promise<T[]> {
+  const { accessToken, instanceUrl } = await getAccessToken();
+  let page = await soqlQuery<T & Record<string, unknown>>(soql);
+  const records: T[] = [...page.records];
+  let next = (page as { nextRecordsUrl?: string }).nextRecordsUrl;
+  while (!page.done && next) {
+    const res = await fetch(`${instanceUrl}${next}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`SOQL query failed (${res.status}): ${await res.text()}`);
+    page = (await res.json()) as SoqlResult<T & Record<string, unknown>>;
+    records.push(...page.records);
+    next = (page as { nextRecordsUrl?: string }).nextRecordsUrl;
+  }
+  if (records.length !== page.totalSize) throw new Error(`Short read: ${records.length} of ${page.totalSize} rows`);
+  return records;
+}
+
 export function usingMockData(): boolean {
   if (process.env.USE_MOCK_DATA === "true") return true;
   return !process.env.SF_CLIENT_ID || !process.env.SF_CLIENT_SECRET;
