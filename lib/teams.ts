@@ -16,6 +16,22 @@ const ROSTER: Record<Team, string[]> = {
   ],
 };
 
+// Salesforce User ids for the roster, used where activity is credited to the
+// person who did it (Zoom calls and meetings) rather than through an account.
+// Copied from the CSM Team Activity dashboard's roster.json
+// (gheffner/agent_tracking, csm-activity/), verified live 2026-10-09.
+const USER_IDS: Record<string, string> = {
+  "Anna Grouzdev": "0054W00000FVcByQAL",
+  "Austin Leyba": "005QU00000HB26LYAT",
+  "Sahil Saini": "005QU00000Ms6i5YAB",
+  "Tiffany Figueroa": "0054W00000FrqyEQAR",
+  "Ashlie Aguilar": "005QU00000HB2BBYA1",
+  "Danny Rasmussen": "005QU000001VtAwYAK",
+  "Guillermo Celta": "005QU00000OSFvxYAH",
+  "Jeremy Galvez": "005QU00000WZCaAYAX",
+  "Nestor Ramirez": "0054W00000FfKZuQAN",
+};
+
 // People who show up in the data but never count toward a team's KPIs.
 // Accounts attributed to them are surfaced as a data-cleanup list instead.
 const NOT_COUNTED: Record<string, string[]> = {
@@ -51,3 +67,10 @@ export function notCountedReason(name: string): string {
 }
 
 export const rosterNames = (team: Team) => ROSTER[team];
+
+// Every roster member with a known Salesforce User id. A roster name missing
+// from USER_IDS is left out of the Zoom minutes until its id is added.
+export const rosterUsers = (): { id: string; name: string }[] =>
+  Object.values(ROSTER)
+    .flat()
+    .flatMap((name) => (USER_IDS[name] ? [{ id: USER_IDS[name], name }] : []));

@@ -2,8 +2,8 @@
 // runs before the read-only integration user exists. Field names below are
 // confirmed against the salesforce repo's metadata (force-app/main/default/objects)
 // as of GTM-2496 — re-verify against that repo if these objects change.
-import { soqlQuery, usingMockData } from "./salesforce";
-import { POOL, teamOf } from "./teams";
+import { soqlQuery, soqlQueryAll, usingMockData } from "./salesforce";
+import { POOL, rosterUsers, teamOf } from "./teams";
 
 export interface CsmMetric {
   csm: string;
@@ -33,7 +33,8 @@ export interface BonusMetrics {
   netConversions: MetricSection;
   qbrCoverage: MetricSection;
   nps: MetricSection;
-  meaningfulConnections: { note: string; candidates: string[] };
+  // Meaningful connections: Zoom Phone + Zoom meeting minutes per person.
+  zoomMinutes: MetricSection;
   saveRate: MetricSection;
   csat: MetricSection;
   windowStart: string;
@@ -53,6 +54,13 @@ export function statusFor(value: number, target: number): CsmMetric["status"] {
   if (pct >= 0.85) return "warning";
   if (pct >= 0.6) return "serious";
   return "critical";
+}
+
+// Context line for a Zoom minutes row, e.g. "1,240 phone (310 calls) · 2,100 meetings (40)".
+export function zoomDetail(phone: number, calls: number, meetings: number, meetingCount: number, gongWeeks: number): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  const fallback = gongWeeks > 0 ? ` · phone from Gong in ${gongWeeks} wk` : "";
+  return `${n(phone)} phone (${n(calls)} calls) · ${n(meetings)} meetings (${n(meetingCount)})${fallback}`;
 }
 
 // For metrics where LOWER is better (e.g. logo churn count vs. a cap) —
@@ -344,31 +352,107 @@ const CSAT_SOQL = (surveyId: string, windowStart: string, windowEnd: string) => 
   GROUP BY ${CSM_GROUP("Account__r.")}
 `;
 
-// --- Unresolved (GTM-2515) ------------------------------------------------
-// Meaningful connections / Zoom minutes has no confirmed source yet.
-// Two candidates, neither confirmed as of 2026-09-28:
-//   - CX_Event__c.Meeting_Actual_Duration__c (actual Zoom video-meeting
-//     duration per logged customer event)
-//   - ZVC__Zoom_Call_Log__c.Call_Duration_Minutes__c (Zoom PHONE call logs,
-//     tied to Tasks via ZoomTaskAssociationBatch — likely the wrong object,
-//     since "meaningful connections" is about video meetings)
-// Do not wire either into production metrics until GTM-2515 closes.
+// 7. Meaningful connections (GTM-2515) — Zoom Phone minutes plus Zoom meeting
+// minutes per person, against 4 hours per working day (Q4 baseline). Follows
+// the CSM Team Activity dashboard's schema (gheffner/agent_tracking,
+// csm-activity/scripts/), so both pages show the same minutes:
+//   phone ..... ZVC__Zoom_Call_Log__c, inbound and outbound calls only, by
+//               OwnerId, started on ZVC__Ring_Start_Time__c, minutes from
+//               Call_Duration_Minutes__c.
+//   meetings .. Gong__Gong_Call__c with Gong__System__c = 'Zoom', by
+//               Gong__Primary_User__c, started on Gong__Call_Start__c,
+//               Gong__Call_Duration_sec__c / 60. Gong only sees recorded
+//               meetings, so this is a floor.
+//   fallback .. per person and Monday-Sunday Eastern week, the Zoom call log
+//               wins when it has at least as many calls as Gong's
+//               'Zoom Phone (Calls)'; otherwise Gong's calls are used (some
+//               people have no call-log rows at all).
+// Credited to the person who made the call or held the meeting, so the
+// Assigned/Temporary CSM rule doesn't apply. It needs one row per call because
+// the fallback is decided per Eastern week, which SOQL can't group by.
+const userIds = (users: { id: string }[]) => users.map((u) => `'${u.id}'`).join(", ");
 
-export const MEANINGFUL_CONNECTIONS_GAP = {
-  note: "Metric definition and Salesforce source unresolved — see GTM-2515.",
-  candidates: [
-    "CX_Event__c.Meeting_Actual_Duration__c",
-    "ZVC__Zoom_Call_Log__c.Call_Duration_Minutes__c (Zoom Phone — likely wrong object)",
-  ],
-};
+const ZOOM_CALLS_SOQL = (ids: string, windowStart: string, windowEnd: string) => `
+  SELECT OwnerId, ZVC__Ring_Start_Time__c, Call_Duration_Minutes__c
+  FROM ZVC__Zoom_Call_Log__c
+  WHERE ZVC__Ring_Start_Time__c >= ${dt(windowStart)} AND ZVC__Ring_Start_Time__c < ${dt(windowEnd)}
+    AND OwnerId IN (${ids})
+    AND ZVC__Call_Type__c IN ('outbound', 'inbound')
+`;
+
+const GONG_CALLS_SOQL = (ids: string, windowStart: string, windowEnd: string) => `
+  SELECT Gong__Primary_User__c, Gong__System__c, Gong__Call_Start__c, Gong__Call_Duration_sec__c
+  FROM Gong__Gong_Call__c
+  WHERE Gong__Call_Start__c >= ${dt(windowStart)} AND Gong__Call_Start__c < ${dt(windowEnd)}
+    AND Gong__Primary_User__c IN (${ids})
+    AND Gong__System__c IN ('Zoom', 'Zoom Phone (Calls)')
+`;
+
+export const MINUTES_PER_WORKING_DAY_DEFAULT = 240;
+
+// Monday-Friday days in [windowStart, windowEnd). Holidays aren't excluded.
+export function workingDays(windowStart: string, windowEnd: string): number {
+  let n = 0;
+  for (let d = new Date(`${windowStart}T00:00:00Z`); d < new Date(`${windowEnd}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1)) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) n++;
+  }
+  return n;
+}
+
+// Monday (YYYY-MM-DD) of the Eastern-time week a Salesforce timestamp falls in.
+const ET_DATE = new Intl.DateTimeFormat("en-CA", { timeZone: REPORTING_TZ, year: "numeric", month: "2-digit", day: "2-digit" });
+export function easternWeek(ts: string): string {
+  const day = new Date(`${ET_DATE.format(new Date(ts.replace(/\+0000$/, "Z")))}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+  return day.toISOString().slice(0, 10);
+}
+
+export interface ActivityRow {
+  user: string;
+  week: string;
+  kind: "zoomCall" | "gongCall" | "meeting";
+  minutes: number;
+}
+
+// Per person: phone minutes (call log or Gong, chosen per week), meeting
+// minutes, and the counts behind them.
+export function zoomMinutesByUser(rows: ActivityRow[]) {
+  type Week = Record<ActivityRow["kind"], ActivityRow[]>;
+  const byUser = new Map<string, Map<string, Week>>();
+  for (const r of rows) {
+    const weeks = byUser.get(r.user) ?? new Map<string, Week>();
+    const w = weeks.get(r.week) ?? { zoomCall: [], gongCall: [], meeting: [] };
+    w[r.kind].push(r);
+    weeks.set(r.week, w);
+    byUser.set(r.user, weeks);
+  }
+  const total = (rs: ActivityRow[]) => rs.reduce((n, r) => n + r.minutes, 0);
+  const out = new Map<string, { phoneMin: number; calls: number; meetingMin: number; meetings: number; gongWeeks: number }>();
+  for (const [user, weeks] of byUser) {
+    const acc = { phoneMin: 0, calls: 0, meetingMin: 0, meetings: 0, gongWeeks: 0 };
+    for (const w of weeks.values()) {
+      const useGong = w.zoomCall.length < w.gongCall.length;
+      const phone = useGong ? w.gongCall : w.zoomCall;
+      if (useGong) acc.gongWeeks++;
+      acc.calls += phone.length;
+      acc.phoneMin += total(phone);
+      acc.meetings += w.meeting.length;
+      acc.meetingMin += total(w.meeting);
+    }
+    out.set(user, acc);
+  }
+  return out;
+}
 
 // --- Targets --------------------------------------------------------------
 // Comp-plan targets aren't in Salesforce. These defaults are PLACEHOLDERS until
 // the real per-CSM values are finalized with Samuel; override them without a
 // rebuild by setting BONUS_TARGETS to JSON, e.g.
-//   {"logoChurn":2,"netConversions":10,"qbrCoverage":80,"nps":50,"saveRate":60,"csat":4.5}
+//   {"logoChurn":2,"netConversions":10,"qbrCoverage":80,"nps":50,"saveRate":60,"csat":4.5,"zoomMinutesPerDay":240}
 const DEFAULT_TARGETS = {
   logoChurn: 2,
+  zoomMinutesPerDay: MINUTES_PER_WORKING_DAY_DEFAULT,
   netConversions: 10,
   qbrCoverage: 80,
   nps: 50,
@@ -421,7 +505,14 @@ function mockMetrics(windowStart: string, windowEnd: string, by: Attribution): B
       }),
     },
     nps: mk(50, 0.05),
-    meaningfulConnections: MEANINGFUL_CONNECTIONS_GAP,
+    zoomMinutes: {
+      rows: csms.filter((csm) => csm !== POOL).map((csm, i) => {
+        const target = t.zoomMinutesPerDay * workingDays(windowStart, windowEnd);
+        const phone = Math.round(target * (0.25 + 0.05 * i));
+        const meetings = Math.round(target * (0.45 + 0.04 * i));
+        return { csm, value: phone + meetings, target, detail: zoomDetail(phone, 40 + i * 9, meetings, 12 + i * 3, 0), status: statusFor(phone + meetings, target) };
+      }),
+    },
     saveRate: {
       rows: csms.map((csm, i) => {
         const total = 10 + i * 3;
@@ -560,6 +651,32 @@ export async function getBonusMetrics(
     });
   });
 
+  const zoomMinutes = section(async () => {
+    const users = rosterUsers();
+    const ids = userIds(users);
+    const [calls, gong] = await Promise.all([
+      soqlQueryAll<Record<string, unknown>>(ZOOM_CALLS_SOQL(ids, windowStart, windowEnd)),
+      soqlQueryAll<Record<string, unknown>>(GONG_CALLS_SOQL(ids, windowStart, windowEnd)),
+    ]);
+    const activity: ActivityRow[] = [
+      ...calls.map((r) => ({ user: String(r.OwnerId), week: easternWeek(String(r.ZVC__Ring_Start_Time__c)), kind: "zoomCall" as const, minutes: Number(r.Call_Duration_Minutes__c ?? 0) })),
+      ...gong.map((r) => ({
+        user: String(r.Gong__Primary_User__c),
+        week: easternWeek(String(r.Gong__Call_Start__c)),
+        kind: r.Gong__System__c === "Zoom" ? ("meeting" as const) : ("gongCall" as const),
+        minutes: Number(r.Gong__Call_Duration_sec__c ?? 0) / 60,
+      })),
+    ];
+    const byUser = zoomMinutesByUser(activity);
+    const target = t.zoomMinutesPerDay * workingDays(windowStart, windowEnd);
+    return users.map(({ id, name }) => {
+      const a = byUser.get(id) ?? { phoneMin: 0, calls: 0, meetingMin: 0, meetings: 0, gongWeeks: 0 };
+      const phone = Math.round(a.phoneMin);
+      const meetings = Math.round(a.meetingMin);
+      return { csm: name, value: phone + meetings, target, detail: zoomDetail(phone, a.calls, meetings, a.meetings, a.gongWeeks), status: statusFor(phone + meetings, target) };
+    });
+  });
+
   // CSAT average is rebuilt from summed totals / counts, never averaged averages.
   const csat = section(async () => {
     const surveyId = process.env.CSAT_SURVEY_ID ?? "CX-CSAT";
@@ -577,7 +694,7 @@ export async function getBonusMetrics(
     netConversions: await netConversions,
     qbrCoverage: await qbrCoverage,
     nps: await nps,
-    meaningfulConnections: MEANINGFUL_CONNECTIONS_GAP,
+    zoomMinutes: await zoomMinutes,
     saveRate: await saveRate,
     csat: await csat,
     windowStart,

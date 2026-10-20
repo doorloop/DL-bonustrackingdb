@@ -7,6 +7,7 @@ import {
   type BonusMetrics,
   type CsmMetric,
   type MetricSection,
+  type Targets,
 } from "@/lib/metrics";
 import { notCountedReason, POOL, rosterNames, teamOf, TEAMS, type Team } from "@/lib/teams";
 import {
@@ -64,6 +65,10 @@ const STATUS_LABEL: Record<CsmMetric["status"], string> = {
   critical: "At risk",
 };
 
+// Thousands separators, so minute totals read as 15,600 rather than 15600.
+const num = (v: number, decimals = 0) =>
+  v.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+
 function Info({ text }: { text: string }) {
   return (
     <span className="info" title={text} aria-label={text} role="img">
@@ -102,11 +107,13 @@ const members = (team: Team) => (team === "pooled" ? [...rosterNames(team), POOL
 // --- Scorecard (one row per CSM, one column per KPI) -------------------------
 
 const SCORECARD: {
-  key: "logoChurn" | "netConversions" | "qbrCoverage" | "nps" | "saveRate" | "csat";
+  key: "logoChurn" | "netConversions" | "qbrCoverage" | "nps" | "saveRate" | "csat" | "zoomMinutes";
   label: string;
   unit?: string;
   decimals?: number;
   targetPrefix?: string;
+  // Header text when the target isn't one number from `targets`.
+  targetText?: (t: Targets) => string;
 }[] = [
   { key: "logoChurn", label: "Logo churn", targetPrefix: "max " },
   { key: "netConversions", label: "Net monthly → annual" },
@@ -114,6 +121,7 @@ const SCORECARD: {
   { key: "nps", label: "NPS" },
   { key: "saveRate", label: "Save rate", unit: "%" },
   { key: "csat", label: "CSAT", decimals: 1 },
+  { key: "zoomMinutes", label: "Zoom minutes", targetText: (t) => `target ${t.zoomMinutesPerDay}/working day` },
 ];
 
 function Scorecard({ team, m }: { team: Team; m: BonusMetrics }) {
@@ -131,9 +139,9 @@ function Scorecard({ team, m }: { team: Team; m: BonusMetrics }) {
                 <th key={c.key} className="num">
                   {c.label}
                   <span className="th-target">
-                    target {c.targetPrefix ?? ""}
-                    {m.targets[c.key].toFixed(c.decimals ?? 0)}
-                    {c.unit ?? ""}
+                    {c.targetText
+                      ? c.targetText(m.targets)
+                      : `target ${c.targetPrefix ?? ""}${m.targets[c.key as keyof Targets].toFixed(c.decimals ?? 0)}${c.unit ?? ""}`}
                   </span>
                 </th>
               ))}
@@ -162,7 +170,7 @@ function Scorecard({ team, m }: { team: Team; m: BonusMetrics }) {
                     <td key={c.key} className="num">
                       <span className={`score status-${row.status}`} title={`${STATUS_LABEL[row.status]}${row.detail ? ` · ${row.detail}` : ""}`}>
                         <span className="status-dot" aria-hidden="true" />
-                        {row.value.toFixed(c.decimals ?? 0)}
+                        {num(row.value, c.decimals)}
                         {c.unit ?? ""}
                       </span>
                       {row.detail && <span className="cell-detail">{row.detail}</span>}
@@ -227,7 +235,16 @@ function teamSummary(m: BonusMetrics): Summary[] {
     },
     { label: "QBR coverage", ...pooled(m.qbrCoverage, "active accounts"), tone: "neon" },
     { label: "Save rate", ...pooled(m.saveRate, "requests saved"), tone: "ink" },
+    { label: "Zoom minutes", ...zoomTotal(m.zoomMinutes), tone: "blue" },
   ];
+}
+
+// Team minutes against the team's combined target (each CSM's target summed).
+function zoomTotal(s: MetricSection): { value: string; sub: string } {
+  if (s.error) return { value: "—", sub: "couldn't load" };
+  if (s.rows.length === 0) return { value: "—", sub: "no data in this period" };
+  const target = s.rows.reduce((acc, r) => acc + (r.target ?? 0), 0);
+  return { value: num(sum(s)), sub: `phone + meetings · target ${num(target)}` };
 }
 
 function SummaryCard({ s }: { s: Summary }) {
@@ -247,7 +264,7 @@ function Tile({ metric, unit = "", decimals = 0 }: { metric: CsmMetric; unit?: s
     <div className="tile">
       <span className="tile-csm">{metric.csm}</span>
       <span className="tile-value">
-        {metric.value.toFixed(decimals)}
+        {num(metric.value, decimals)}
         {unit}
       </span>
       {metric.detail && <span className="tile-meta">{metric.detail}</span>}
@@ -259,7 +276,7 @@ function Tile({ metric, unit = "", decimals = 0 }: { metric: CsmMetric; unit?: s
       )}
       {metric.target !== undefined && (
         <span className="tile-meta">
-          target {metric.target.toFixed(decimals)}
+          target {num(metric.target, decimals)}
           {unit}
         </span>
       )}
@@ -356,6 +373,11 @@ function TeamBand({ team, label, m, tint }: { team: Team; label: string; m: Bonu
             decimals={1}
             emptyNote="No CSAT responses (survey CX-CSAT) for this team in this period."
           />
+          <Panel
+            title="Meaningful connections (Zoom minutes)"
+            info="Zoom Phone minutes (inbound and outbound) plus Zoom meeting minutes recorded by Gong, credited to the person who made the call or held the meeting. Phone minutes come from the Zoom call log, or from Gong for any week where Gong has more calls. Target: 4 hours per working day in the period. Same rules as the CSM Team Activity dashboard."
+            section={m.zoomMinutes}
+          />
         </div>
       </div>
     </section>
@@ -394,6 +416,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     nps: forTeam(metrics.nps, t),
     saveRate: forTeam(metrics.saveRate, t),
     csat: forTeam(metrics.csat, t),
+    zoomMinutes: forTeam(metrics.zoomMinutes, t),
   });
 
   return (
@@ -409,7 +432,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
           <h1>CSM Bonus Tracking</h1>
           <p className="lede">
             How the dedicated and pooled teams are tracking against the bonus KPIs: logo churn, monthly → annual
-            conversions, QBR coverage, NPS, save rate and CSAT. Pick a period and which assignment rule to use.
+            conversions, QBR coverage, NPS, save rate, CSAT and Zoom minutes. Pick a period and which assignment rule to use.
           </p>
 
           <nav className="pills" aria-label="Reporting period">
@@ -524,24 +547,6 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
                   </table>
                 </div>
               )}
-            </section>
-          </div>
-        </section>
-
-        <section className="band band-tint">
-          <div className="wrap">
-            <section className="panel">
-              <h3>
-                Meaningful connections / Zoom minutes <Info text="Not wired up until GTM-2515 settles the definition." />
-              </h3>
-              <div className="note">
-                <strong>Not wired up yet.</strong> {metrics.meaningfulConnections.note}
-                <ul>
-                  {metrics.meaningfulConnections.candidates.map((c) => (
-                    <li key={c}>{c}</li>
-                  ))}
-                </ul>
-              </div>
             </section>
           </div>
         </section>

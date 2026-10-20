@@ -34,7 +34,7 @@ Instead, set up a **separate, read-only** integration:
 2. Create a dedicated **run-as integration user** on a permission set that grants:
    - API access + a **read-only** profile (no CRUD, no metadata scope)
    - Query/read access to: `Account`, `MRR_Change__c`, `CX_Event__c`, `NPS_Score__c`,
-     `DoorLoop_Cancelation_Request__c`
+     `DoorLoop_Cancelation_Request__c`, `ZVC__Zoom_Call_Log__c`, `Gong__Gong_Call__c`
 3. Fill in `.env.local`:
    ```
    SF_INSTANCE_URL=https://doorloop.my.salesforce.com
@@ -47,7 +47,7 @@ Optional env vars:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `BONUS_TARGETS` | `{"logoChurn":2,"netConversions":10,"qbrCoverage":80,"nps":50,"saveRate":60,"csat":4.5}` | Comp-plan targets (placeholders — they are not in Salesforce). Any subset of keys overrides the defaults. |
+| `BONUS_TARGETS` | `{"logoChurn":2,"netConversions":10,"qbrCoverage":80,"nps":50,"saveRate":60,"csat":4.5,"zoomMinutesPerDay":240}` | Comp-plan targets (placeholders — they are not in Salesforce). Any subset of keys overrides the defaults. |
 | `CSAT_SURVEY_ID` | `CX-CSAT` | `CX_Event__c.Survey_Id__c` value that identifies the CSAT survey. |
 
 The page and `/api/metrics` default to quarter-to-date and accept `?quarter=-1` (previous
@@ -72,7 +72,7 @@ connected, pull its platform guide and fill in the actual deploy step (see the T
 | Net monthly ↔ annual conversions | `MRR_Change__c.Starting_Price_Interval__c` / `Ending_Price_Interval__c` (`month`/`year`) | **Confirmed** — object purpose-built for this |
 | QBR coverage | % of the CSM's active book (`Account.Account_Status__c = 'Active Customer'`, attributed by the CSM rule) with ≥1 `CX_Event__c` where `Event_Category__c = 'Account Review'` ("Business Review with DoorLoop", confirmed 2026-09-28) completed in the window. Book is today's snapshot (no assignment history in SF). | **Confirmed field, no data** — as of 2026-10-01 no `CX_Event__c` has ever been logged as `Account Review`; CS calls are logged as `Customer Success`. The tile reads empty until QBRs are logged under that category. |
 | NPS | `NPS_Score__c.Score__c` (child of Contact via Master-Detail `Contact__c`; NPS = %promoters 9–10 − %detractors 0–6, not an average; filtered on `Date__c` = send date; onboarding NPS on `Onboarding__c.Onboarding_NPS_Score__c` excluded), joined `Contact__r.Account.Vitally_Assigned_CSM__c` (Contact→Account is the standard `AccountId` lookup) (⚠️ `NPS_Score__c.User__c` is the outreach caller, not the CSM — never group by it; `Score__c` is `Number(2,0)` and SOQL can't `GROUP BY` a number field, so the code runs three grouped counts: all / ≥9 / ≤6) | **Confirmed source; pipeline mid-migration** — GTM-2512 (Intercom→Salesforce automation) is still open, so coverage is partial/manual until it ships |
-| Meaningful connections / Zoom minutes | Candidates: `CX_Event__c.Meeting_Actual_Duration__c` or `ZVC__Zoom_Call_Log__c.Call_Duration_Minutes__c` (the latter is Zoom **Phone**, likely the wrong object) | **Gap — unresolved.** [GTM-2515](https://linear.app/doorloop/issue/GTM-2515) is open specifically to define this metric and its source. Do not ship either candidate as the real metric until that closes. |
+| Meaningful connections / Zoom minutes | Phone: `ZVC__Zoom_Call_Log__c` (inbound/outbound, `OwnerId`, `ZVC__Ring_Start_Time__c`, `Call_Duration_Minutes__c`). Meetings: `Gong__Gong_Call__c` where `Gong__System__c = 'Zoom'` (`Gong__Primary_User__c`, `Gong__Call_Start__c`, `Gong__Call_Duration_sec__c`). Per person and Monday–Sunday Eastern week, the call log wins when it has at least as many calls as Gong's `Zoom Phone (Calls)`, otherwise Gong's calls are used. Credited to the person, not the account CSM. Target 240 min per working day (`zoomMinutesPerDay`). | **Same schema as the CSM Team Activity dashboard** (`gheffner/agent_tracking`, branch `gheffner/csm-activity-dashboard`, `csm-activity/`). Phone + meetings, 4 h/day agreed for Q4 per [GTM-2515](https://linear.app/doorloop/issue/GTM-2515). Gong only sees recorded meetings, so meeting minutes are a floor. |
 | Save rate | `DoorLoop_Cancelation_Request__c.Status__c = 'Saved'` over all rows with `Assigned_To__c` populated in-window | **Confirmed** — matches the existing `Open_Saves_by_Owner` / `Cancel Requests This Month by Outcome` reports in the salesforce repo |
 | CSAT | `CX_Event__c.Survey_Rating__c` (1–5 scale) **filtered by `Survey_Id__c = 'CX-CSAT'`** — never aggregate this field across survey types | **Confirmed, sparse** — one response in prod as of 2026-10-01 |
 
